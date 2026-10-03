@@ -7,7 +7,9 @@
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
     "db:migrate": "tsx src/db/migrate.ts",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:correctness": "node scripts/correctness-attacks.mjs",
+    "test:phase8": "npm run typecheck && npm test && npm run test:correctness"
   },
   "keywords": [],
   "author": "",
