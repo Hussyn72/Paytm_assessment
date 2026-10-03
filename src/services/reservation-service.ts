@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { pool } from '../db/client.js';
 import { DomainError } from '../errors/domain-error.js';
 
@@ -5,12 +6,60 @@ export interface ReserveInput {
   showId: string;
   userId: string;
   seats: string[];
+  idempotencyKey: string;
 }
 
-export async function reserveSeats(input: ReserveInput) {
+export interface ReservationResponse {
+  reservation_id: string;
+  show_id: string;
+  user_id: string;
+  seats: string[];
+  amount_paise: number;
+  status: 'confirmed';
+}
+
+function requestHash(seats: string[]) {
+  return createHash('sha256').update(JSON.stringify([...seats].sort())).digest('hex');
+}
+
+export async function reserveSeats(input: ReserveInput): Promise<ReservationResponse> {
   const client = await pool.connect();
+  const requestedSeats = [...input.seats].sort();
+  const hash = requestHash(requestedSeats);
+
   try {
     await client.query('BEGIN');
+
+    // The primary key is the serialization point for concurrent retries of the same logical request.
+    await client.query(
+      `INSERT INTO idempotency_keys(user_id, show_id, key, request_hash)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (user_id, show_id, key) DO NOTHING`,
+      [input.userId, input.showId, input.idempotencyKey, hash],
+    );
+
+    const idempotencyResult = await client.query<{
+      request_hash: string;
+      response_status: number | null;
+      response_body: ReservationResponse | null;
+    }>(
+      `SELECT request_hash, response_status, response_body
+       FROM idempotency_keys
+       WHERE user_id = $1 AND show_id = $2 AND key = $3
+       FOR UPDATE`,
+      [input.userId, input.showId, input.idempotencyKey],
+    );
+    const idempotency = idempotencyResult.rows[0];
+    if (!idempotency) throw new Error('Idempotency row missing after insert');
+
+    if (idempotency.request_hash !== hash) {
+      throw new DomainError('IDEMPOTENCY_KEY_CONFLICT', 409, 'Idempotency key was already used with a different request');
+    }
+
+    if (idempotency.response_status !== null && idempotency.response_body !== null) {
+      await client.query('COMMIT');
+      return idempotency.response_body;
+    }
 
     const showResult = await client.query<{ price_paise: string; per_user_limit: number }>(
       'SELECT price_paise, per_user_limit FROM shows WHERE id = $1',
@@ -19,7 +68,6 @@ export async function reserveSeats(input: ReserveInput) {
     const show = showResult.rows[0];
     if (!show) throw new DomainError('SHOW_NOT_FOUND', 404, 'Show not found');
 
-    // One row per (show,user) is the serialization point for concurrent limit checks.
     await client.query(
       `INSERT INTO user_show_inventory(show_id, user_id, active_seat_count)
        VALUES ($1, $2, 0)
@@ -36,12 +84,10 @@ export async function reserveSeats(input: ReserveInput) {
     );
     const activeSeatCount = inventoryResult.rows[0]?.active_seat_count ?? 0;
 
-    if (activeSeatCount + input.seats.length > show.per_user_limit) {
+    if (activeSeatCount + requestedSeats.length > show.per_user_limit) {
       throw new DomainError('PER_USER_LIMIT_EXCEEDED', 409, 'Per-user seat limit exceeded');
     }
 
-    // Deterministic ordering keeps overlapping multi-seat transactions from locking rows in opposite orders.
-    const requestedSeats = [...input.seats].sort();
     const seatResult = await client.query<{ id: string; seat_number: string; status: 'available' | 'confirmed' }>(
       `SELECT id, seat_number, status
        FROM seats
@@ -59,10 +105,10 @@ export async function reserveSeats(input: ReserveInput) {
     }
 
     const amountPaise = Number(show.price_paise) * requestedSeats.length;
-    const reservationResult = await client.query<{ id: string; created_at: Date }>(
+    const reservationResult = await client.query<{ id: string }>(
       `INSERT INTO reservations(show_id, user_id, amount_paise, status)
        VALUES ($1, $2, $3, 'confirmed')
-       RETURNING id, created_at`,
+       RETURNING id`,
       [input.showId, input.userId, amountPaise],
     );
     const reservation = reservationResult.rows[0];
@@ -87,15 +133,24 @@ export async function reserveSeats(input: ReserveInput) {
       [input.showId, input.userId, requestedSeats.length],
     );
 
-    await client.query('COMMIT');
-    return {
+    const response: ReservationResponse = {
       reservation_id: reservation.id,
       show_id: input.showId,
       user_id: input.userId,
       seats: requestedSeats,
       amount_paise: amountPaise,
-      status: 'confirmed' as const,
+      status: 'confirmed',
     };
+
+    await client.query(
+      `UPDATE idempotency_keys
+       SET reservation_id = $4, response_status = 201, response_body = $5::jsonb
+       WHERE user_id = $1 AND show_id = $2 AND key = $3`,
+      [input.userId, input.showId, input.idempotencyKey, reservation.id, JSON.stringify(response)],
+    );
+
+    await client.query('COMMIT');
+    return response;
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;

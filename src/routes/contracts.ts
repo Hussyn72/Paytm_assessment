@@ -10,9 +10,7 @@ function validate<T>(
   value: unknown,
 ): T {
   const result = schema.safeParse(value);
-  if (!result.success) {
-    throw new DomainError('VALIDATION_ERROR', 400, 'Request validation failed', result.error.flatten());
-  }
+  if (!result.success) throw new DomainError('VALIDATION_ERROR', 400, 'Request validation failed', result.error.flatten());
   return result.data;
 }
 
@@ -20,10 +18,7 @@ export async function contractRoutes(app: FastifyInstance) {
   app.post('/shows', { preHandler: requireAdmin }, async (request, reply) => {
     const body = validate(createShowBodySchema, request.body);
     const show = await createShow({
-      name: body.name,
-      seats: body.seats,
-      pricePaise: body.price_paise,
-      perUserLimit: body.per_user_limit,
+      name: body.name, seats: body.seats, pricePaise: body.price_paise, perUserLimit: body.per_user_limit,
     });
     return reply.status(201).send(show);
   });
@@ -35,6 +30,7 @@ export async function contractRoutes(app: FastifyInstance) {
       showId: params.showId,
       userId: request.user.sub,
       seats: body.seats,
+      idempotencyKey: body.idempotency_key,
     });
     return reply.status(201).send(reservation);
   });
