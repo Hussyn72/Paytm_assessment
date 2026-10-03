@@ -84,13 +84,13 @@ describe('API authentication and contracts', () => {
     expect(response.statusCode).toBe(400);
   });
 
-  it('derives cancellation actor from JWT subject', async () => {
+  it('uses JWT identity for cancellation authorization', async () => {
     const token = app.jwt.sign({ sub: 'owner-9', role: 'user' });
     const response = await app.inject({
       method: 'POST', url: `/reservations/${RESERVATION_ID}/cancel`,
       headers: { authorization: `Bearer ${token}` },
     });
-    expect(response.statusCode).toBe(200);
-    expect(response.json().actor_user_id).toBe('owner-9');
+    expect(response.statusCode).toBe(404);
+    expect(response.json().error.code).toBe('RESERVATION_NOT_FOUND');
   });
 });

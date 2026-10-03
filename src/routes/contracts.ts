@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { authenticate, requireAdmin } from '../auth/authenticate.js';
 import { createShowBodySchema, reservationIdParamsSchema, reserveBodySchema, showIdParamsSchema } from '../contracts/schemas.js';
 import { DomainError } from '../errors/domain-error.js';
+import { cancelReservation } from '../services/cancellation-service.js';
 import { reserveSeats } from '../services/reservation-service.js';
 import { createShow, getShowState } from '../services/show-service.js';
 
@@ -27,17 +28,14 @@ export async function contractRoutes(app: FastifyInstance) {
     const params = validate(showIdParamsSchema, request.params);
     const body = validate(reserveBodySchema, request.body);
     const reservation = await reserveSeats({
-      showId: params.showId,
-      userId: request.user.sub,
-      seats: body.seats,
-      idempotencyKey: body.idempotency_key,
+      showId: params.showId, userId: request.user.sub, seats: body.seats, idempotencyKey: body.idempotency_key,
     });
     return reply.status(201).send(reservation);
   });
 
   app.post('/reservations/:reservationId/cancel', { preHandler: authenticate }, async (request) => {
     const params = validate(reservationIdParamsSchema, request.params);
-    return { contract: 'cancel', actor_user_id: request.user.sub, reservation_id: params.reservationId };
+    return cancelReservation(params.reservationId, request.user.sub);
   });
 
   app.get('/shows/:showId', async (request) => {
